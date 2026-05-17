@@ -830,6 +830,49 @@
     </div>
   </div>
 
+  <!-- Team Settings Modal -->
+  <div id="teamSettingsModalBackdrop" class="modal-backdrop" role="dialog" aria-modal="true" aria-label="Team settings">
+    <div class="modal" style="max-width:540px;">
+      <div class="modal-header">
+        <h3>Team Settings</h3>
+        <button class="btn-secondary btn-sm" type="button" onclick="closeTeamSettings()">&#10005; Close</button>
+      </div>
+      <div class="modal-body">
+        <div id="teamSettingsBanner" class="alert-banner" role="alert"></div>
+
+        <!-- Read-only notice for non-admins -->
+        <div id="settingsReadOnlyNotice" class="hidden" style="background:var(--warning-light);color:var(--warning);padding:10px 12px;border-radius:8px;font-size:13px;margin-bottom:16px;">
+          You are a member of this team. Only admins or owners can edit team settings.
+        </div>
+
+        <!-- Team Name section -->
+        <div style="margin-bottom:24px;">
+          <label for="settingsTeamName" style="display:block;font-weight:600;margin-bottom:8px;">Team Name</label>
+          <div style="display:flex;gap:8px;">
+            <input id="settingsTeamName" type="text" style="flex:1;" />
+            <button id="settingsTeamNameSave" class="btn-primary" type="button" onclick="saveTeamName()">Save</button>
+          </div>
+        </div>
+
+        <!-- Team Logo section -->
+        <div style="margin-bottom:8px;">
+          <label style="display:block;font-weight:600;margin-bottom:8px;">Team Logo</label>
+          <div style="display:flex;align-items:center;gap:14px;">
+            <div id="settingsLogoPreview" style="width:72px;height:72px;border-radius:14px;background:var(--accent);display:grid;place-items:center;overflow:hidden;flex-shrink:0;color:#fff;">
+              <!-- preview set by JS -->
+            </div>
+            <div style="flex:1;">
+              <button id="settingsLogoChangeBtn" class="btn-secondary" type="button" onclick="document.getElementById('settingsLogoFile').click()">Change Logo</button>
+              <button id="settingsLogoRemoveBtn" class="btn-secondary" type="button" style="margin-left:6px;" onclick="removeTeamLogo()">Remove</button>
+              <p style="font-size:12px;color:var(--muted);margin-top:6px;">PNG, JPG, SVG, or WebP. Max 2MB.</p>
+            </div>
+          </div>
+          <input id="settingsLogoFile" type="file" accept="image/png,image/jpeg,image/svg+xml,image/webp" style="display:none;" onchange="handleSettingsLogoChange(event)" />
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- App View -->
   <div id="appView" class="app-shell hidden">
     <aside class="sidebar" role="navigation" aria-label="Main navigation">
@@ -859,6 +902,10 @@
       <button id="quickBtn-owned" class="nav-btn" onclick="setQuickFilter('owned')">Owned by Me</button>
 
       <div class="sidebar-footer">
+        <button class="nav-btn" type="button" onclick="openTeamSettings()" style="margin-bottom:8px;display:flex;align-items:center;gap:8px;">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          Team Settings
+        </button>
         <div id="currentAccountLabel">
           <strong>Signed In</strong>
           Loading…
@@ -1503,14 +1550,124 @@
       return publicUrl;
     }
 
-    // Click handler for the sidebar badge — opens the hidden file picker.
+    // Click handler for the sidebar badge — now routes to the full team settings modal.
     function promptChangeTeamLogo() {
+      openTeamSettings();
+    }
+
+    // ─────────────────────────────────────────────
+    // TEAM SETTINGS MODAL
+    // ─────────────────────────────────────────────
+
+    function openTeamSettings() {
       if (!currentTeam) return;
-      if (currentTeam.role !== 'owner' && currentTeam.role !== 'admin') {
-        showBanner("appBanner", "error", "Only team admins or owners can change the logo.");
+      hideBanner("teamSettingsBanner");
+
+      // Populate the form with the current team's info.
+      document.getElementById("settingsTeamName").value = currentTeam.name || "";
+
+      // Logo preview.
+      renderSettingsLogoPreview();
+
+      // Lock controls if user is not admin or owner.
+      const isAdmin = currentTeam.role === "owner" || currentTeam.role === "admin";
+      document.getElementById("settingsTeamName").disabled            = !isAdmin;
+      document.getElementById("settingsTeamNameSave").disabled        = !isAdmin;
+      document.getElementById("settingsLogoChangeBtn").disabled       = !isAdmin;
+      document.getElementById("settingsLogoRemoveBtn").disabled       = !isAdmin || !currentTeam.logo_url;
+      document.getElementById("settingsReadOnlyNotice").classList.toggle("hidden", isAdmin);
+
+      document.getElementById("teamSettingsModalBackdrop").classList.add("open");
+    }
+
+    function closeTeamSettings() {
+      document.getElementById("teamSettingsModalBackdrop").classList.remove("open");
+    }
+
+    function renderSettingsLogoPreview() {
+      const preview = document.getElementById("settingsLogoPreview");
+      if (!preview) return;
+      if (currentTeam?.logo_url) {
+        preview.style.background = "#fff";
+        preview.style.padding    = "4px";
+        preview.innerHTML = `<img src="${escapeHtml(currentTeam.logo_url)}" alt="" style="width:100%;height:100%;object-fit:contain;display:block;"/>`;
+      } else {
+        preview.style.background = "var(--accent)";
+        preview.style.padding    = "0";
+        preview.innerHTML = `<svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 7 9 12 4 17" opacity="0.35"/><polyline points="10 7 15 12 10 17" opacity="0.7"/><polyline points="16 7 21 12 16 17" stroke="#f97316"/></svg>`;
+      }
+    }
+
+    async function saveTeamName() {
+      hideBanner("teamSettingsBanner");
+      const newName = document.getElementById("settingsTeamName").value.trim();
+      if (!newName) {
+        showBanner("teamSettingsBanner", "error", "Team name cannot be empty.");
         return;
       }
-      document.getElementById("changeLogoInput").click();
+      if (newName === currentTeam.name) {
+        showBanner("teamSettingsBanner", "success", "No changes to save.");
+        return;
+      }
+      setLoading(true);
+      try {
+        const { error } = await db.from("teams").update({ name: newName }).eq("id", currentTeamId);
+        if (error) throw error;
+        currentTeam.name = newName;
+        const teamInList = userTeams.find(t => t.id === currentTeamId);
+        if (teamInList) teamInList.name = newName;
+        renderTeamHeader();
+        showBanner("teamSettingsBanner", "success", "Team name updated.");
+      } catch (err) {
+        showBanner("teamSettingsBanner", "error", err.message ?? String(err));
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    async function handleSettingsLogoChange(event) {
+      const file = event.target.files && event.target.files[0];
+      if (!file || !currentTeamId) return;
+      hideBanner("teamSettingsBanner");
+      setLoading(true);
+      try {
+        const publicUrl = await uploadTeamLogo(file, currentTeamId);
+        if (currentTeam) currentTeam.logo_url = publicUrl;
+        const teamInList = userTeams.find(t => t.id === currentTeamId);
+        if (teamInList) teamInList.logo_url = publicUrl;
+        renderTeamHeader();
+        renderSettingsLogoPreview();
+        document.getElementById("settingsLogoRemoveBtn").disabled = false;
+        showBanner("teamSettingsBanner", "success", "Logo updated.");
+      } catch (err) {
+        showBanner("teamSettingsBanner", "error", err.message ?? String(err));
+      } finally {
+        setLoading(false);
+        event.target.value = "";
+      }
+    }
+
+    async function removeTeamLogo() {
+      if (!currentTeam || !currentTeam.logo_url) return;
+      hideBanner("teamSettingsBanner");
+      setLoading(true);
+      try {
+        // Clear logo_url on the team row. (We leave the file in Storage — harmless;
+        // future upload will overwrite it. Could be cleaned up later.)
+        const { error } = await db.from("teams").update({ logo_url: null }).eq("id", currentTeamId);
+        if (error) throw error;
+        if (currentTeam) currentTeam.logo_url = null;
+        const teamInList = userTeams.find(t => t.id === currentTeamId);
+        if (teamInList) teamInList.logo_url = null;
+        renderTeamHeader();
+        renderSettingsLogoPreview();
+        document.getElementById("settingsLogoRemoveBtn").disabled = true;
+        showBanner("teamSettingsBanner", "success", "Logo removed.");
+      } catch (err) {
+        showBanner("teamSettingsBanner", "error", err.message ?? String(err));
+      } finally {
+        setLoading(false);
+      }
     }
 
     // Triggered when a file is selected via the hidden input.
@@ -2189,6 +2346,7 @@
       document.addEventListener("keydown", e => {
         if (e.key !== "Escape") return;
         if (document.getElementById("confirmBackdrop").classList.contains("open")) { closeConfirm(); return; }
+        if (document.getElementById("teamSettingsModalBackdrop").classList.contains("open")) { closeTeamSettings(); return; }
         if (document.getElementById("changePwModalBackdrop").classList.contains("open")) { closeChangePwModal(); return; }
         if (document.getElementById("editModalBackdrop").classList.contains("open")) { closeEditModal(); return; }
         if (document.getElementById("detailModalBackdrop").classList.contains("open")) { closeDetailModal(); return; }
