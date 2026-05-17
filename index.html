@@ -174,6 +174,20 @@
     }
     .auth-badge svg { width: 26px; height: 26px; }
     .brand-badge svg { width: 22px; height: 22px; color: #fff; }
+    .auth-badge.has-logo,
+    .brand-badge.has-logo {
+      background: #fff;
+      padding: 4px;
+      overflow: hidden;
+    }
+    .auth-badge.has-logo img,
+    .brand-badge.has-logo img {
+      width: 100%; height: 100%;
+      object-fit: contain;
+      display: block;
+    }
+    .brand-badge { transition: transform 0.15s; }
+    .brand-badge:hover { transform: scale(1.05); }
     .auth-logo-text h1 {
       font-family: var(--font-display);
       font-size: 20px;
@@ -766,10 +780,15 @@
         Your team is your shared workspace. Workflows, members, and settings stay within your team.
       </p>
 
-      <div class="form-grid" style="grid-template-columns:1fr;">
+      <div class="form-grid" style="grid-template-columns:1fr;gap:14px;">
         <div>
           <label for="newTeamName">Team Name</label>
           <input id="newTeamName" type="text" placeholder="e.g., Principia" autocomplete="off" />
+        </div>
+        <div>
+          <label for="newTeamLogo">Team Logo <span style="color:var(--muted);font-weight:400;">(optional)</span></label>
+          <input id="newTeamLogo" type="file" accept="image/png,image/jpeg,image/svg+xml,image/webp" style="padding:8px;" />
+          <p style="font-size:12px;color:var(--muted);margin-top:4px;">PNG, JPG, SVG, or WebP. Max 2MB. You can add or change this later.</p>
         </div>
       </div>
 
@@ -1089,6 +1108,9 @@
     </div>
   </div>
 
+  <!-- Hidden file input used when user clicks the team badge to change the logo. -->
+  <input id="changeLogoInput" type="file" accept="image/png,image/jpeg,image/svg+xml,image/webp" style="display:none;" onchange="handleLogoFileChange(event)" />
+
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script>
     // ─────────────────────────────────────────────
@@ -1330,6 +1352,9 @@
     async function createFirstTeam() {
       hideBanner("teamSetupBanner");
       const name = document.getElementById("newTeamName").value.trim();
+      const logoFileInput = document.getElementById("newTeamLogo");
+      const logoFile = logoFileInput?.files?.[0] || null;
+
       if (!name) {
         showBanner("teamSetupBanner", "error", "Please enter a team name.");
         return;
@@ -1343,6 +1368,17 @@
         });
         if (error) throw error;
 
+        // If user picked a logo, upload it now. A failed logo upload should not
+        // block team creation — the team exists; user can add logo later.
+        let logoFailureMsg = "";
+        if (logoFile) {
+          try {
+            await uploadTeamLogo(logoFile, newTeamId);
+          } catch (logoErr) {
+            logoFailureMsg = ` (Team created, but logo upload failed: ${logoErr.message})`;
+          }
+        }
+
         // Reload teams and set the new one as current.
         userTeams = await fetchUserTeams();
         currentTeam = userTeams.find(t => t.id === newTeamId) || userTeams[0] || null;
@@ -1355,7 +1391,7 @@
 
         document.getElementById("teamSetupView").classList.add("hidden");
         await enterApp();
-        showBanner("appBanner", "success", `Welcome to ${name}! Your team is ready.`);
+        showBanner("appBanner", "success", `Welcome to ${name}! Your team is ready.${logoFailureMsg}`);
       } catch (err) {
         showBanner("teamSetupBanner", "error", err.message ?? String(err));
       } finally {
@@ -1393,12 +1429,110 @@
       await enterApp();
     }
 
-    // Update the sidebar/login headers to show the current team name.
+    // Update the sidebar headers (and logo badge) to show the current team.
     function renderTeamHeader() {
-      const sidebarTitle = document.querySelector("#appView .brand h1");
+      const brandBadge      = document.querySelector("#appView .brand-badge");
+      const sidebarTitle    = document.querySelector("#appView .brand h1");
       const sidebarSubtitle = document.querySelector("#appView .brand p");
+
       if (sidebarTitle && currentTeam) sidebarTitle.textContent = currentTeam.name;
-      if (sidebarSubtitle) sidebarSubtitle.textContent = "Forward Efficiency";
+      if (sidebarSubtitle)             sidebarSubtitle.textContent = "Forward Efficiency";
+
+      // Swap badge contents: logo image if team has one, otherwise the chevron SVG.
+      if (brandBadge) {
+        brandBadge.style.cursor = "pointer";
+        brandBadge.title = "Click to change the team logo";
+        if (currentTeam?.logo_url) {
+          brandBadge.classList.add("has-logo");
+          brandBadge.innerHTML =
+            `<img src="${escapeHtml(currentTeam.logo_url)}" alt="${escapeHtml(currentTeam.name)} logo" />`;
+        } else {
+          brandBadge.classList.remove("has-logo");
+          brandBadge.innerHTML =
+            `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="4 7 9 12 4 17" opacity="0.35"/><polyline points="10 7 15 12 10 17" opacity="0.7"/><polyline points="16 7 21 12 16 17" stroke="#f97316"/></svg>`;
+        }
+        // Bind click once.
+        if (!brandBadge.dataset.clickBound) {
+          brandBadge.addEventListener("click", promptChangeTeamLogo);
+          brandBadge.dataset.clickBound = "1";
+        }
+      }
+    }
+
+    // Upload a file to Supabase Storage and update the team's logo_url.
+    async function uploadTeamLogo(file, teamId) {
+      if (!file || !teamId) return null;
+
+      const maxSize = 2 * 1024 * 1024; // 2MB
+      if (file.size > maxSize) {
+        throw new Error("Logo file is too large. Maximum size is 2MB.");
+      }
+      const allowedTypes = [
+        'image/png', 'image/jpeg', 'image/jpg', 'image/svg+xml', 'image/webp'
+      ];
+      if (!allowedTypes.includes(file.type)) {
+        throw new Error("Logo must be a PNG, JPG, SVG, or WebP image.");
+      }
+
+      // Derive a safe extension from the file name; default to png.
+      const lastDot = file.name.lastIndexOf(".");
+      const ext = lastDot >= 0 ? file.name.slice(lastDot + 1).toLowerCase() : "png";
+      const path = `${teamId}/logo.${ext}`;
+
+      // upsert: true → replaces an existing logo at this path.
+      const { error: uploadErr } = await db.storage
+        .from('team-logos')
+        .upload(path, file, {
+          cacheControl: '3600',
+          upsert: true,
+          contentType: file.type
+        });
+      if (uploadErr) throw uploadErr;
+
+      // Get the public URL. Add a timestamp to bust browser cache when we re-upload.
+      const { data: urlData } = db.storage.from('team-logos').getPublicUrl(path);
+      const publicUrl = (urlData?.publicUrl || "") + `?v=${Date.now()}`;
+
+      // Save the URL on the team row.
+      const { error: updateErr } = await db
+        .from('teams')
+        .update({ logo_url: publicUrl })
+        .eq('id', teamId);
+      if (updateErr) throw updateErr;
+
+      return publicUrl;
+    }
+
+    // Click handler for the sidebar badge — opens the hidden file picker.
+    function promptChangeTeamLogo() {
+      if (!currentTeam) return;
+      if (currentTeam.role !== 'owner' && currentTeam.role !== 'admin') {
+        showBanner("appBanner", "error", "Only team admins or owners can change the logo.");
+        return;
+      }
+      document.getElementById("changeLogoInput").click();
+    }
+
+    // Triggered when a file is selected via the hidden input.
+    async function handleLogoFileChange(event) {
+      const file = event.target.files && event.target.files[0];
+      if (!file || !currentTeamId) return;
+      setLoading(true);
+      try {
+        const publicUrl = await uploadTeamLogo(file, currentTeamId);
+        // Update local cached team objects so the UI reflects the change immediately.
+        if (currentTeam) currentTeam.logo_url = publicUrl;
+        const teamInList = userTeams.find(t => t.id === currentTeamId);
+        if (teamInList) teamInList.logo_url = publicUrl;
+        renderTeamHeader();
+        showBanner("appBanner", "success", "Team logo updated.");
+      } catch (err) {
+        showBanner("appBanner", "error", err.message ?? String(err));
+      } finally {
+        setLoading(false);
+        // Reset the input so the same file can be selected again later if needed.
+        event.target.value = "";
+      }
     }
 
     async function ensureProfileRow(sessionUser, fallbackFirstName = "") {
