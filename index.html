@@ -724,6 +724,37 @@
     </div>
   </div>
 
+  <!-- Team Setup View (shown after sign-in if user has no team yet) -->
+  <div id="teamSetupView" class="auth-wrap hidden">
+    <div class="auth-card card">
+      <div class="auth-logo">
+        <div class="auth-badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="4 7 9 12 4 17" opacity="0.35"/><polyline points="10 7 15 12 10 17" opacity="0.7"/><polyline points="16 7 21 12 16 17" stroke="#f97316"/></svg></div>
+        <div class="auth-logo-text">
+          <h1>Create Your Team</h1>
+          <p>Get started with Forward Efficiency</p>
+        </div>
+      </div>
+
+      <div id="teamSetupBanner" class="alert-banner" role="alert"></div>
+
+      <p style="font-size:14px;color:var(--muted);margin-bottom:18px;">
+        Your team is your shared workspace. Workflows, members, and settings stay within your team.
+      </p>
+
+      <div class="form-grid" style="grid-template-columns:1fr;">
+        <div>
+          <label for="newTeamName">Team Name</label>
+          <input id="newTeamName" type="text" placeholder="e.g., Principia" autocomplete="off" />
+        </div>
+      </div>
+
+      <div style="margin-top:18px;display:flex;gap:10px;">
+        <button class="btn-primary" type="button" onclick="createFirstTeam()">Create Team</button>
+        <button class="btn-secondary" type="button" onclick="signOutFromTeamSetup()">Sign Out</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Change Password Modal -->
   <div id="changePwModalBackdrop" class="modal-backdrop" role="dialog" aria-modal="true" aria-label="Change password">
     <div class="modal" style="max-width:480px;">
@@ -1077,6 +1108,11 @@
     let pendingDeleteId = "";
     let inRecoveryMode  = false;
 
+    // Team state (added in Phase 2 — multi-team support)
+    let userTeams      = [];   // teams the user is a member of
+    let currentTeam    = null; // the team object currently selected
+    let currentTeamId  = "";   // shortcut to currentTeam.id
+
     function escapeHtml(str) {
       return String(str ?? "")
         .replace(/&/g, "&amp;").replace(/</g, "&lt;")
@@ -1182,9 +1218,27 @@
     }
 
     async function fetchProfiles() {
+      // No current team? Nothing to fetch.
+      if (!currentTeamId) {
+        profiles = [];
+        return;
+      }
+      // Get the list of user ids who are members of the current team.
+      const { data: members, error: memErr } = await db
+        .from("team_members")
+        .select("user_id")
+        .eq("team_id", currentTeamId);
+      if (memErr) throw memErr;
+      const userIds = (members ?? []).map(m => m.user_id);
+      if (userIds.length === 0) {
+        profiles = [];
+        return;
+      }
+      // Get profile rows for those user ids only.
       const { data, error } = await db
         .from("profiles")
         .select("id, first_name, email")
+        .in("id", userIds)
         .order("first_name", { ascending: true });
       if (error) throw error;
       profiles = data ?? [];
@@ -1192,9 +1246,14 @@
     }
 
     async function fetchWorkflows() {
+      if (!currentTeamId) {
+        tasks = [];
+        return;
+      }
       const { data, error } = await db
         .from("workflows")
         .select("*")
+        .eq("team_id", currentTeamId)
         .order("due_date", { ascending: true });
       if (error) throw error;
       tasks = data ?? [];
@@ -1209,6 +1268,109 @@
       } finally {
         setLoading(false);
       }
+    }
+
+    // ─────────────────────────────────────────────
+    // TEAM MANAGEMENT (Phase 2)
+    // ─────────────────────────────────────────────
+
+    // Fetch all teams the current user is a member of, with their role on each.
+    async function fetchUserTeams() {
+      if (!currentUserId) return [];
+      const { data, error } = await db
+        .from("team_members")
+        .select("role, teams(id, name, logo_url, created_at)")
+        .eq("user_id", currentUserId);
+      if (error) throw error;
+      return (data ?? [])
+        .filter(row => row.teams !== null)
+        .map(row => ({ ...row.teams, role: row.role }));
+    }
+
+    // Show the "Create Your Team" screen.
+    function showTeamSetupView() {
+      document.getElementById("authView").classList.add("hidden");
+      document.getElementById("appView").classList.add("hidden");
+      document.getElementById("teamSetupView").classList.remove("hidden");
+      hideBanner("teamSetupBanner");
+      const nameInput = document.getElementById("newTeamName");
+      nameInput.value = "";
+      setTimeout(() => nameInput.focus(), 50);
+    }
+
+    // Called by the "Create Team" button on the team setup view.
+    async function createFirstTeam() {
+      hideBanner("teamSetupBanner");
+      const name = document.getElementById("newTeamName").value.trim();
+      if (!name) {
+        showBanner("teamSetupBanner", "error", "Please enter a team name.");
+        return;
+      }
+      setLoading(true);
+      try {
+        // Atomic: creates the team and adds caller as owner in one DB call.
+        const { data: newTeamId, error } = await db.rpc("create_team_with_owner", {
+          p_name: name,
+          p_logo_url: null
+        });
+        if (error) throw error;
+
+        // Reload teams and set the new one as current.
+        userTeams = await fetchUserTeams();
+        currentTeam = userTeams.find(t => t.id === newTeamId) || userTeams[0] || null;
+        currentTeamId = currentTeam ? currentTeam.id : "";
+
+        // Save selection for next visit.
+        if (currentTeamId) {
+          try { localStorage.setItem("fe_currentTeamId", currentTeamId); } catch {}
+        }
+
+        document.getElementById("teamSetupView").classList.add("hidden");
+        await enterApp();
+        showBanner("appBanner", "success", `Welcome to ${name}! Your team is ready.`);
+      } catch (err) {
+        showBanner("teamSetupBanner", "error", err.message ?? String(err));
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    // Sign out from the team setup screen (in case user wants to abort).
+    async function signOutFromTeamSetup() {
+      try { await db.auth.signOut(); } catch {}
+      currentSession = null;
+      currentUserId  = "";
+      userTeams      = [];
+      currentTeam    = null;
+      currentTeamId  = "";
+      try { localStorage.removeItem("fe_currentTeamId"); } catch {}
+      document.getElementById("teamSetupView").classList.add("hidden");
+      document.getElementById("appView").classList.add("hidden");
+      document.getElementById("authView").classList.remove("hidden");
+    }
+
+    // After sign-in, decide where to send the user: team setup or the app.
+    async function routeAfterSignIn() {
+      userTeams = await fetchUserTeams();
+      if (userTeams.length === 0) {
+        showTeamSetupView();
+        return;
+      }
+      // Try to restore the last-used team from localStorage.
+      let savedTeamId = "";
+      try { savedTeamId = localStorage.getItem("fe_currentTeamId") || ""; } catch {}
+      currentTeam = userTeams.find(t => t.id === savedTeamId) || userTeams[0];
+      currentTeamId = currentTeam.id;
+      try { localStorage.setItem("fe_currentTeamId", currentTeamId); } catch {}
+      await enterApp();
+    }
+
+    // Update the sidebar/login headers to show the current team name.
+    function renderTeamHeader() {
+      const sidebarTitle = document.querySelector("#appView .brand h1");
+      const sidebarSubtitle = document.querySelector("#appView .brand p");
+      if (sidebarTitle && currentTeam) sidebarTitle.textContent = currentTeam.name;
+      if (sidebarSubtitle) sidebarSubtitle.textContent = "Forward Efficiency";
     }
 
     async function ensureProfileRow(sessionUser, fallbackFirstName = "") {
@@ -1554,6 +1716,10 @@
 
     async function saveWorkflow() {
       hideBanner("appBanner");
+      if (!currentTeamId) {
+        showBanner("appBanner", "error", "No team selected — please refresh and try again.");
+        return;
+      }
       const payload = {
         title:          document.getElementById("taskTitle").value.trim(),
         workflow_type:  document.getElementById("taskType").value,
@@ -1564,7 +1730,8 @@
         due_date:       document.getElementById("dueDate").value,
         next_step_date: document.getElementById("nextStepDate").value,
         description:    document.getElementById("taskDescription").value.trim(),
-        created_by:     currentSession?.user?.id ?? null
+        created_by:     currentSession?.user?.id ?? null,
+        team_id:        currentTeamId
       };
 
       if (!validatePayload(payload, "appBanner")) return;
@@ -1810,8 +1977,10 @@
 
     async function enterApp() {
       document.getElementById("authView").classList.add("hidden");
+      document.getElementById("teamSetupView").classList.add("hidden");
       document.getElementById("appView").classList.remove("hidden");
       hideBanner("appBanner");
+      renderTeamHeader();
       await refreshData();
     }
 
@@ -1909,7 +2078,7 @@
           currentUserId  = session.user?.id ?? "";
           try {
             await ensureProfileRow(session.user);
-            await enterApp();
+            await routeAfterSignIn();
           } catch (err) {
             showBanner("authBanner", "error", err.message ?? String(err));
           }
@@ -1934,7 +2103,7 @@
           showRecoveryPrompt(currentSession);
         } else if (currentSession) {
           await ensureProfileRow(currentSession.user);
-          await enterApp();
+          await routeAfterSignIn();
         }
       } catch (err) {
         showBanner("authBanner", "error", err.message ?? String(err));
