@@ -721,6 +721,31 @@
           <button class="btn-secondary" type="button" onclick="switchAuthTab('signin')">Back to Sign In</button>
         </div>
       </div>
+
+      <!-- Verify Email Panel (shown after sign-up when confirmation is required) -->
+      <div id="panel-verify-email" class="hidden">
+        <div style="text-align:center;padding:8px 0 16px;">
+          <div style="width:64px;height:64px;border-radius:50%;background:var(--accent-light);display:grid;place-items:center;margin:0 auto 18px;color:var(--accent);">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+          </div>
+          <h2 style="font-family:var(--font-display);font-size:24px;color:var(--accent);margin-bottom:8px;">Check Your Email</h2>
+          <p style="font-size:14px;color:var(--muted);line-height:1.55;margin-bottom:6px;">
+            We just sent a confirmation link to:
+          </p>
+          <p id="verifyEmailAddress" style="font-size:15px;font-weight:600;color:var(--text);margin-bottom:18px;">
+            your@email.com
+          </p>
+          <p style="font-size:14px;color:var(--muted);line-height:1.55;margin-bottom:22px;">
+            Click the link in that email to activate your account, then return here to sign in.
+          </p>
+          <p style="font-size:13px;color:var(--muted);line-height:1.55;margin-bottom:8px;">
+            Didn't get it? Check your spam folder, or wait a minute and try again.
+          </p>
+        </div>
+        <div class="auth-actions">
+          <button class="btn-primary" type="button" onclick="switchAuthTab('signin')">Back to Sign In</button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -1071,9 +1096,12 @@
     // ─────────────────────────────────────────────
     const SUPABASE_URL      = "https://ahvizbxnxtfyynljfhpe.supabase.co";
     const SUPABASE_ANON_KEY = "sb_publishable_WgbR80HyP4DONB7xQArWHQ_JAZXgxs_";
-    // APP_URL is computed at runtime so the app works on any host (microapp.live,
-    // GitHub Pages, etc.) without needing a code change.
-    const APP_URL           = window.location.origin + window.location.pathname + "?recovery=true";
+    // URLs are computed at runtime so the app works on any host without code changes.
+    // APP_URL_BASE is the clean URL (used for signup confirmation links).
+    // RECOVERY_URL adds the ?recovery=true marker so password-reset links trigger
+    // the dedicated reset flow.
+    const APP_URL_BASE      = window.location.origin + window.location.pathname;
+    const RECOVERY_URL      = APP_URL_BASE + "?recovery=true";
     const db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
     const WORKFLOW_TYPES = [
@@ -1790,11 +1818,15 @@
     }
 
     function switchAuthTab(tab) {
-      ["signin","signup","forgot"].forEach(t => {
-        document.getElementById("panel-" + t).classList.toggle("hidden", t !== tab);
+      ["signin","signup","forgot","verify-email"].forEach(t => {
+        const panel = document.getElementById("panel-" + t);
+        if (panel) panel.classList.toggle("hidden", t !== tab);
         const btn = document.getElementById("tab-" + t);
         if (btn) btn.classList.toggle("active", t === tab);
       });
+      // Hide the tab row when on verify-email — no escape back into regular forms.
+      const tabRow = document.querySelector("#authView .auth-tab-row");
+      if (tabRow) tabRow.classList.toggle("hidden", tab === "verify-email");
       hideBanner("authBanner");
     }
 
@@ -1837,16 +1869,26 @@
       }
       setLoading(true);
       try {
-        const { error } = await db.auth.signUp({
+        const { data, error } = await db.auth.signUp({
           email, password,
           options: {
             data: { first_name: firstName },
-            emailRedirectTo: APP_URL
+            emailRedirectTo: APP_URL_BASE
           }
         });
         if (error) throw error;
-        showBanner("authBanner", "success", "Account created! Check your email to confirm, then sign in.");
-        switchAuthTab("signin");
+
+        // If Supabase requires email confirmation, the user is NOT signed in yet.
+        // Show a clear "Check your email" screen instead of a tiny banner.
+        const needsConfirmation = !data?.session;
+        if (needsConfirmation) {
+          document.getElementById("verifyEmailAddress").textContent = email;
+          switchAuthTab("verify-email");
+        } else {
+          // Confirmation is disabled — user is signed in immediately.
+          // The onAuthStateChange handler will route them to team setup.
+          showBanner("authBanner", "success", "Account created! Signing you in...");
+        }
       } catch (err) {
         showBanner("authBanner", "error", err.message ?? String(err));
       } finally {
@@ -1904,7 +1946,7 @@
       setLoading(true);
       try {
         const { error } = await db.auth.resetPasswordForEmail(email, {
-          redirectTo: APP_URL
+          redirectTo: RECOVERY_URL
         });
         if (error) throw error;
         showBanner("authBanner", "success", "Reset email sent! Check your inbox and click the link to set a new password.");
