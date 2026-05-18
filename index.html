@@ -961,7 +961,7 @@
         </div>
 
         <!-- Team Logo section -->
-        <div style="margin-bottom:8px;">
+        <div style="margin-bottom:24px;">
           <label style="display:block;font-weight:600;margin-bottom:8px;">Team Logo</label>
           <div style="display:flex;align-items:center;gap:14px;">
             <div id="settingsLogoPreview" style="width:72px;height:72px;border-radius:14px;background:var(--accent);display:grid;place-items:center;overflow:hidden;flex-shrink:0;color:#fff;">
@@ -974,6 +974,47 @@
             </div>
           </div>
           <input id="settingsLogoFile" type="file" accept="image/png,image/jpeg,image/svg+xml,image/webp" style="display:none;" onchange="handleSettingsLogoChange(event)" />
+        </div>
+
+        <!-- Members section -->
+        <div style="margin-bottom:24px;border-top:1px solid var(--border);padding-top:18px;">
+          <label style="display:block;font-weight:600;margin-bottom:8px;">Members</label>
+          <div id="settingsMembersList" style="font-size:13px;color:var(--muted);">Loading…</div>
+        </div>
+
+        <!-- Invite a Teammate section (admin/owner only) -->
+        <div id="settingsInviteSection" style="margin-bottom:8px;border-top:1px solid var(--border);padding-top:18px;">
+          <label style="display:block;font-weight:600;margin-bottom:6px;">Invite a Teammate</label>
+          <p style="font-size:13px;color:var(--muted);margin-bottom:12px;">
+            Generate a shareable invite link. Anyone with the link can join this team.
+          </p>
+          <div style="display:flex;gap:8px;align-items:flex-end;margin-bottom:10px;flex-wrap:wrap;">
+            <div style="flex:1;min-width:180px;">
+              <label for="inviteEmail" style="font-size:13px;font-weight:500;display:block;margin-bottom:4px;">Email <span style="color:var(--muted);font-weight:400;">(optional, for your records)</span></label>
+              <input id="inviteEmail" type="email" placeholder="teammate@example.com" />
+            </div>
+            <div style="width:130px;">
+              <label for="inviteRole" style="font-size:13px;font-weight:500;display:block;margin-bottom:4px;">Role</label>
+              <select id="inviteRole">
+                <option value="member">Member</option>
+                <option value="admin">Admin</option>
+              </select>
+            </div>
+          </div>
+          <button id="generateInviteBtn" class="btn-primary" type="button" onclick="generateInviteLink()">Generate Invite Link</button>
+
+          <!-- The generated link gets shown here -->
+          <div id="inviteLinkResult" class="hidden" style="margin-top:14px;background:var(--accent-light);padding:12px;border-radius:8px;">
+            <label style="font-size:13px;font-weight:500;display:block;margin-bottom:6px;color:var(--accent);">Share this link:</label>
+            <div style="display:flex;gap:8px;">
+              <input id="inviteLinkInput" type="text" readonly style="flex:1;font-family:monospace;font-size:12px;background:#fff;" />
+              <button class="btn-secondary" type="button" onclick="copyInviteLink()">Copy</button>
+            </div>
+            <p style="font-size:12px;color:var(--muted);margin-top:8px;">Link expires in 7 days. Anyone with this link can join.</p>
+          </div>
+
+          <!-- List of pending (not-yet-accepted) invitations -->
+          <div id="settingsPendingInvitations" style="margin-top:16px;"></div>
         </div>
       </div>
     </div>
@@ -1417,11 +1458,11 @@
       document.getElementById("loadingOverlay").classList.toggle("active", on);
     }
 
-    function showBanner(id, type, message) {
+    function showBanner(id, type, message, persistent = false) {
       const el = document.getElementById(id);
       el.className = `alert-banner show-${type}`;
       el.textContent = message;
-      if (type === "success") setTimeout(() => hideBanner(id), 4000);
+      if (type === "success" && !persistent) setTimeout(() => hideBanner(id), 4000);
     }
 
     function hideBanner(id) {
@@ -1598,18 +1639,26 @@
 
     // After sign-in, decide where to send the user: team setup or the app.
     async function routeAfterSignIn() {
+      // If the user arrived via an invite link, accept it first.
+      const acceptedTeamId = await handlePendingInvite();
+
       userTeams = await fetchUserTeams();
       if (userTeams.length === 0) {
         showTeamSetupView();
         return;
       }
-      // Try to restore the last-used team from localStorage.
-      let savedTeamId = "";
-      try { savedTeamId = localStorage.getItem("fe_currentTeamId") || ""; } catch {}
+      // Prefer the just-accepted team; otherwise restore the last-used team.
+      let savedTeamId = acceptedTeamId || "";
+      if (!savedTeamId) {
+        try { savedTeamId = localStorage.getItem("fe_currentTeamId") || ""; } catch {}
+      }
       currentTeam = userTeams.find(t => t.id === savedTeamId) || userTeams[0];
       currentTeamId = currentTeam.id;
       try { localStorage.setItem("fe_currentTeamId", currentTeamId); } catch {}
       await enterApp();
+      if (acceptedTeamId) {
+        showBanner("appBanner", "success", `You've joined ${currentTeam.name}.`);
+      }
     }
 
     // Update the sidebar headers (and logo badge) to show the current team.
@@ -1779,7 +1828,38 @@
       document.getElementById("settingsLogoRemoveBtn").disabled       = !isAdmin || !currentTeam.logo_url;
       document.getElementById("settingsReadOnlyNotice").classList.toggle("hidden", isAdmin);
 
+      // Invite section is only available to admins/owners.
+      document.getElementById("settingsInviteSection").classList.toggle("hidden", !isAdmin);
+
+      // Reset invite form state.
+      const emailEl = document.getElementById("inviteEmail");
+      const roleEl  = document.getElementById("inviteRole");
+      if (emailEl) emailEl.value = "";
+      if (roleEl)  roleEl.value  = "member";
+      document.getElementById("inviteLinkResult").classList.add("hidden");
+
       document.getElementById("teamSettingsModalBackdrop").classList.add("open");
+
+      // Load members + pending invitations asynchronously.
+      loadSettingsMembersAndInvites();
+    }
+
+    async function loadSettingsMembersAndInvites() {
+      const membersDiv = document.getElementById("settingsMembersList");
+      const pendingDiv = document.getElementById("settingsPendingInvitations");
+      if (membersDiv) membersDiv.innerHTML = "Loading…";
+      if (pendingDiv) pendingDiv.innerHTML = "";
+      try {
+        const members = await fetchTeamMembers();
+        renderMembersList(members);
+        const isAdmin = currentTeam && (currentTeam.role === "owner" || currentTeam.role === "admin");
+        if (isAdmin) {
+          const pending = await fetchPendingInvitations();
+          renderPendingInvitations(pending);
+        }
+      } catch (err) {
+        if (membersDiv) membersDiv.innerHTML = `<span style="color:var(--danger);">${escapeHtml(err.message || String(err))}</span>`;
+      }
     }
 
     function closeTeamSettings() {
@@ -1869,6 +1949,178 @@
         showBanner("teamSettingsBanner", "error", err.message ?? String(err));
       } finally {
         setLoading(false);
+      }
+    }
+
+    // ─────────────────────────────────────────────
+    // MEMBERS & INVITATIONS (Phase 4a)
+    // ─────────────────────────────────────────────
+
+    // Fetch all members of the current team along with their profile info.
+    async function fetchTeamMembers() {
+      if (!currentTeamId) return [];
+      const { data, error } = await db
+        .from("team_members")
+        .select("user_id, role, created_at, profiles(first_name, email)")
+        .eq("team_id", currentTeamId)
+        .order("created_at", { ascending: true });
+      if (error) throw error;
+      return data ?? [];
+    }
+
+    function renderMembersList(members) {
+      const container = document.getElementById("settingsMembersList");
+      if (!container) return;
+      if (!members || members.length === 0) {
+        container.innerHTML = `<span style="color:var(--muted);">No members yet.</span>`;
+        return;
+      }
+      const roleBadge = (role) => {
+        const colors = {
+          owner:  { bg: "#fef3c7", fg: "#92400e" },
+          admin:  { bg: "#e0e7ff", fg: "#3730a3" },
+          member: { bg: "#f3f4f6", fg: "#374151" }
+        };
+        const c = colors[role] || colors.member;
+        return `<span style="background:${c.bg};color:${c.fg};font-size:11px;font-weight:600;padding:3px 8px;border-radius:999px;text-transform:uppercase;letter-spacing:0.3px;">${role}</span>`;
+      };
+      container.innerHTML = members.map(m => {
+        const name  = m.profiles?.first_name || "(unknown)";
+        const email = m.profiles?.email      || "";
+        const isMe  = m.user_id === currentUserId;
+        return `
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border);">
+            <div>
+              <div style="font-size:14px;color:var(--text);font-weight:500;">${escapeHtml(name)}${isMe ? ' <span style="color:var(--muted);font-weight:400;font-size:12px;">(you)</span>' : ''}</div>
+              <div style="font-size:12px;color:var(--muted);">${escapeHtml(email)}</div>
+            </div>
+            ${roleBadge(m.role)}
+          </div>
+        `;
+      }).join("");
+    }
+
+    // Generate a new invite link.
+    async function generateInviteLink() {
+      hideBanner("teamSettingsBanner");
+      const email = document.getElementById("inviteEmail").value.trim();
+      const role  = document.getElementById("inviteRole").value;
+      if (role !== "admin" && role !== "member") {
+        showBanner("teamSettingsBanner", "error", "Pick a role.");
+        return;
+      }
+      setLoading(true);
+      try {
+        const { data, error } = await db.rpc("create_invitation", {
+          p_team_id: currentTeamId,
+          p_email:   email || null,
+          p_role:    role
+        });
+        if (error) throw error;
+        if (!data?.token) throw new Error("No token returned");
+
+        // Build the shareable URL using the current host + ?invite=TOKEN.
+        const url = `${window.location.origin}${window.location.pathname}?invite=${data.token}`;
+        document.getElementById("inviteLinkInput").value = url;
+        document.getElementById("inviteLinkResult").classList.remove("hidden");
+
+        // Refresh the pending invitations list.
+        const pending = await fetchPendingInvitations();
+        renderPendingInvitations(pending);
+
+        showBanner("teamSettingsBanner", "success", "Invite link generated. Copy and share it.");
+      } catch (err) {
+        showBanner("teamSettingsBanner", "error", err.message ?? String(err));
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    function copyInviteLink() {
+      const input = document.getElementById("inviteLinkInput");
+      if (!input) return;
+      input.select();
+      input.setSelectionRange(0, 99999); // mobile
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(input.value).then(
+            () => showBanner("teamSettingsBanner", "success", "Link copied to clipboard."),
+            () => showBanner("teamSettingsBanner", "error", "Couldn't copy automatically. Select the link and press Ctrl+C.")
+          );
+        } else {
+          // Older fallback
+          document.execCommand("copy");
+          showBanner("teamSettingsBanner", "success", "Link copied to clipboard.");
+        }
+      } catch (err) {
+        showBanner("teamSettingsBanner", "error", "Couldn't copy automatically. Select the link and press Ctrl+C.");
+      }
+    }
+
+    // Get pending (un-accepted, not-expired) invitations for the current team.
+    async function fetchPendingInvitations() {
+      if (!currentTeamId) return [];
+      const { data, error } = await db
+        .from("invitations")
+        .select("id, email, role, token, expires_at, created_at, accepted_at")
+        .eq("team_id", currentTeamId)
+        .is("accepted_at", null)
+        .gt("expires_at", new Date().toISOString())
+        .order("created_at", { ascending: false });
+      if (error) throw error;
+      return data ?? [];
+    }
+
+    function renderPendingInvitations(invites) {
+      const container = document.getElementById("settingsPendingInvitations");
+      if (!container) return;
+      if (!invites || invites.length === 0) {
+        container.innerHTML = "";
+        return;
+      }
+      const rowsHtml = invites.map(inv => {
+        const url = `${window.location.origin}${window.location.pathname}?invite=${inv.token}`;
+        const label = inv.email ? escapeHtml(inv.email) : `<span style="color:var(--muted);">(any recipient)</span>`;
+        return `
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);font-size:13px;">
+            <div style="flex:1;min-width:0;overflow:hidden;">
+              <div>${label} <span style="font-size:11px;color:var(--muted);">· ${inv.role}</span></div>
+              <div style="font-size:11px;color:var(--muted);font-family:monospace;text-overflow:ellipsis;overflow:hidden;white-space:nowrap;">${escapeHtml(url)}</div>
+            </div>
+            <button class="btn-secondary btn-sm" type="button" onclick="copyExistingInvite('${inv.token}')" style="margin-left:8px;flex-shrink:0;">Copy</button>
+          </div>
+        `;
+      }).join("");
+      container.innerHTML = `
+        <label style="display:block;font-size:13px;font-weight:600;margin-bottom:6px;">Pending Invitations</label>
+        ${rowsHtml}
+      `;
+    }
+
+    function copyExistingInvite(token) {
+      const url = `${window.location.origin}${window.location.pathname}?invite=${token}`;
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(url).then(
+          () => showBanner("teamSettingsBanner", "success", "Link copied to clipboard."),
+          () => showBanner("teamSettingsBanner", "error", "Couldn't copy. Open the link manually.")
+        );
+      }
+    }
+
+    // After sign-in, if a pending invite token is in sessionStorage, accept it.
+    async function handlePendingInvite() {
+      let token = "";
+      try { token = sessionStorage.getItem("fe_inviteToken") || ""; } catch {}
+      if (!token) return null;
+      try {
+        const { data: teamId, error } = await db.rpc("accept_invitation", { p_token: token });
+        if (error) throw error;
+        try { sessionStorage.removeItem("fe_inviteToken"); } catch {}
+        return teamId; // the team they just joined
+      } catch (err) {
+        try { sessionStorage.removeItem("fe_inviteToken"); } catch {}
+        showBanner("authBanner", "error", "Couldn't accept invite: " + (err.message || String(err)));
+        return null;
       }
     }
 
@@ -2573,6 +2825,39 @@
         urlQuery.get("type")     === "recovery" ||
         urlHash.get("type")      === "recovery"
       );
+
+      // ─── Detect a team invitation token in the URL ───
+      // Store it in sessionStorage so it survives a sign-up redirect (or page reload).
+      // After the user signs in, routeAfterSignIn() will pick it up and accept the invite.
+      const inviteTokenFromUrl = urlQuery.get("invite");
+      if (inviteTokenFromUrl) {
+        try { sessionStorage.setItem("fe_inviteToken", inviteTokenFromUrl); } catch {}
+        // Clean the URL so the token isn't re-processed if the page refreshes mid-flow.
+        const cleanQuery = new URLSearchParams(window.location.search);
+        cleanQuery.delete("invite");
+        const newSearch = cleanQuery.toString();
+        window.history.replaceState({}, document.title,
+          window.location.pathname + (newSearch ? "?" + newSearch : "") + window.location.hash);
+        // Fetch a preview of the team (no auth required) and show it on the auth screen.
+        (async () => {
+          try {
+            const { data: preview } = await db.rpc("invitation_preview", { p_token: inviteTokenFromUrl });
+            if (preview && !preview.expired && !preview.accepted) {
+              showBanner("authBanner", "success",
+                `You're invited to join ${preview.team_name}. Sign in or create an account to accept.`,
+                true /* persistent */);
+            } else if (preview && preview.expired) {
+              showBanner("authBanner", "error",
+                "This invitation link has expired. Ask the team admin for a new one.");
+              try { sessionStorage.removeItem("fe_inviteToken"); } catch {}
+            } else if (preview && preview.accepted) {
+              showBanner("authBanner", "error",
+                "This invitation has already been used.");
+              try { sessionStorage.removeItem("fe_inviteToken"); } catch {}
+            }
+          } catch (e) { /* ignore preview errors */ }
+        })();
+      }
 
       // If the email link came back with an error (expired / already used),
       // show a clear message right away instead of spinning forever.
