@@ -295,6 +295,83 @@
     }
     .brand h1 { font-family: var(--font-display); font-size: 18px; line-height: 1.2; }
     .brand p { font-size: 12px; color: rgba(255,255,255,.65); margin-top: 2px; }
+    .team-switcher {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      width: 100%;
+    }
+    .team-switcher-trigger {
+      background: transparent;
+      border: none;
+      color: #fff;
+      cursor: pointer;
+      padding: 4px 8px;
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: background 0.15s;
+      font-family: inherit;
+    }
+    .team-switcher-trigger:hover { background: rgba(255,255,255,.08); }
+    .team-switcher-trigger h1 { margin: 0; }
+    .team-switcher-chevron {
+      width: 14px; height: 14px;
+      opacity: 0.7;
+      transition: transform 0.18s;
+    }
+    .team-switcher.open .team-switcher-chevron { transform: rotate(180deg); }
+
+    .team-switcher-menu {
+      position: absolute;
+      top: calc(100% + 6px);
+      left: 50%;
+      transform: translateX(-50%);
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      box-shadow: var(--shadow-lg);
+      min-width: 220px;
+      max-width: 260px;
+      padding: 6px;
+      z-index: 60;
+      display: none;
+    }
+    .team-switcher.open .team-switcher-menu { display: block; }
+
+    .team-switcher-item,
+    .team-switcher-action {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 9px 12px;
+      border-radius: 7px;
+      cursor: pointer;
+      font-size: 14px;
+      user-select: none;
+    }
+    .team-switcher-item:hover,
+    .team-switcher-action:hover { background: var(--accent-light); }
+    .team-switcher-item.active { background: var(--accent-light); font-weight: 600; }
+    .team-switcher-item-name {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .team-switcher-check {
+      width: 16px; height: 16px;
+      color: var(--accent);
+      flex-shrink: 0;
+    }
+    .team-switcher-spacer { width: 16px; flex-shrink: 0; }
+    .team-switcher-divider { height: 1px; background: var(--border); margin: 4px 0; }
+    .team-switcher-action { color: var(--accent); font-weight: 500; }
+    .team-switcher-action svg { width: 16px; height: 16px; flex-shrink: 0; }
+
     .app-branding {
       margin-top: 16px;
       padding-top: 14px;
@@ -907,9 +984,13 @@
     <aside class="sidebar" role="navigation" aria-label="Main navigation">
       <div class="brand">
         <div class="brand-badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="4 7 9 12 4 17" opacity="0.35"/><polyline points="10 7 15 12 10 17" opacity="0.7"/><polyline points="16 7 21 12 16 17" stroke="#f97316"/></svg></div>
-        <div>
-          <h1>Forward Efficiency</h1>
-          <p>Team Workflow Manager</p>
+        <div class="team-switcher" id="teamSwitcher">
+          <button type="button" class="team-switcher-trigger" onclick="toggleTeamSwitcher()" aria-haspopup="true" aria-expanded="false">
+            <h1>Forward Efficiency</h1>
+            <svg class="team-switcher-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+          <p></p>
+          <div class="team-switcher-menu" id="teamSwitcherMenu" role="menu"></div>
         </div>
       </div>
 
@@ -1419,15 +1500,27 @@
         .map(row => ({ ...row.teams, role: row.role }));
     }
 
-    // Show the "Create Your Team" screen.
+    // Show the team setup screen — works for both first-time and additional team creation.
     function showTeamSetupView() {
       document.getElementById("authView").classList.add("hidden");
       document.getElementById("appView").classList.add("hidden");
       document.getElementById("teamSetupView").classList.remove("hidden");
       hideBanner("teamSetupBanner");
+
+      // Adjust the screen wording based on whether the user already has teams.
+      const isFirstTeam = !userTeams || userTeams.length === 0;
+      const titleEl    = document.querySelector("#teamSetupView .auth-logo-text h1");
+      const subtitleEl = document.querySelector("#teamSetupView .auth-logo-text p");
+      const cancelBtn  = document.querySelector("#teamSetupView .btn-secondary");
+      if (titleEl)    titleEl.textContent    = isFirstTeam ? "Create Your Team"          : "Create New Team";
+      if (subtitleEl) subtitleEl.textContent = isFirstTeam ? "Get started with Forward Efficiency" : "Add another team to your account";
+      if (cancelBtn)  cancelBtn.textContent  = isFirstTeam ? "Sign Out"                  : "Cancel";
+
       const nameInput = document.getElementById("newTeamName");
-      nameInput.value = "";
-      setTimeout(() => nameInput.focus(), 50);
+      const logoInput = document.getElementById("newTeamLogo");
+      if (nameInput) nameInput.value = "";
+      if (logoInput) logoInput.value = "";
+      setTimeout(() => nameInput && nameInput.focus(), 50);
     }
 
     // Called by the "Create Team" button on the team setup view.
@@ -1481,8 +1574,16 @@
       }
     }
 
-    // Sign out from the team setup screen (in case user wants to abort).
+    // The bottom button on the team setup view. Behavior depends on context:
+    //   - If user has no team yet → sign out entirely (they abandoned signup)
+    //   - If user already has teams → just go back to the app (they cancelled creating a new one)
     async function signOutFromTeamSetup() {
+      if (userTeams && userTeams.length > 0) {
+        // Cancel — return to app, keep current team.
+        document.getElementById("teamSetupView").classList.add("hidden");
+        await enterApp();
+        return;
+      }
       try { await db.auth.signOut(); } catch {}
       currentSession = null;
       currentUserId  = "";
@@ -1521,6 +1622,7 @@
       // The "Forward Efficiency" branding now lives in the sidebar footer (.app-branding).
       // The subtitle stays clear so the team identity owns the top of the sidebar.
       if (sidebarSubtitle)             sidebarSubtitle.textContent = "";
+      renderTeamSwitcher();
 
       // Swap badge contents: logo image if team has one, otherwise the chevron SVG.
       if (brandBadge) {
@@ -1542,6 +1644,69 @@
         }
       }
     }
+
+    // ─────────────────────────────────────────────
+    // TEAM SWITCHER (Phase 3)
+    // ─────────────────────────────────────────────
+
+    // Populate the dropdown menu with all of the user's teams + a "Create new team" action.
+    function renderTeamSwitcher() {
+      const menu = document.getElementById("teamSwitcherMenu");
+      if (!menu) return;
+      const checkSvg = '<svg class="team-switcher-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+      const itemsHtml = userTeams.map(t => `
+        <div class="team-switcher-item ${t.id === currentTeamId ? 'active' : ''}" role="menuitem" onclick="switchToTeam('${t.id}')">
+          ${t.id === currentTeamId ? checkSvg : '<span class="team-switcher-spacer"></span>'}
+          <span class="team-switcher-item-name">${escapeHtml(t.name)}</span>
+        </div>
+      `).join("");
+      menu.innerHTML = `
+        ${itemsHtml}
+        <div class="team-switcher-divider"></div>
+        <div class="team-switcher-action" role="menuitem" onclick="openCreateAdditionalTeam()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Create new team
+        </div>
+      `;
+    }
+
+    // Open / close the team switcher dropdown.
+    function toggleTeamSwitcher(force) {
+      const switcher = document.getElementById("teamSwitcher");
+      if (!switcher) return;
+      const willOpen = (typeof force === "boolean") ? force : !switcher.classList.contains("open");
+      switcher.classList.toggle("open", willOpen);
+      const trigger = switcher.querySelector(".team-switcher-trigger");
+      if (trigger) trigger.setAttribute("aria-expanded", willOpen ? "true" : "false");
+    }
+
+    // Switch the app to a different team (one the user already belongs to).
+    async function switchToTeam(teamId) {
+      toggleTeamSwitcher(false);
+      if (!teamId || teamId === currentTeamId) return;
+      const team = userTeams.find(t => t.id === teamId);
+      if (!team) return;
+      currentTeam   = team;
+      currentTeamId = team.id;
+      try { localStorage.setItem("fe_currentTeamId", currentTeamId); } catch {}
+      renderTeamHeader();
+      await refreshData();
+      showBanner("appBanner", "success", `Switched to ${team.name}.`);
+    }
+
+    // Open the team setup view for creating an additional team (user already has one).
+    function openCreateAdditionalTeam() {
+      toggleTeamSwitcher(false);
+      showTeamSetupView();
+    }
+
+    // Close the switcher when clicking outside it.
+    document.addEventListener("click", (e) => {
+      const switcher = document.getElementById("teamSwitcher");
+      if (switcher && switcher.classList.contains("open") && !switcher.contains(e.target)) {
+        toggleTeamSwitcher(false);
+      }
+    });
 
     // Upload a file to Supabase Storage and update the team's logo_url.
     async function uploadTeamLogo(file, teamId) {
